@@ -2,17 +2,46 @@ name: Sync Fork
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天 00:00 UTC 执行一次
-  workflow_dispatch: # on button click
+    - cron: '0 0 * * *'   # 每天 UTC 00:00（北京时间 08:00）执行一次
+  workflow_dispatch:
 
 jobs:
   sync:
-
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - uses: tgymnich/fork-sync@v2.0.10
+      - name: Get repo info (upstream & fork)
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 当前 fork 信息（自动获取）
+          FORK_OWNER="${GITHUB_REPOSITORY_OWNER}"
+          FORK_REPO="${GITHUB_REPOSITORY#*/}"
+          FORK_BRANCH="$(gh api repos/${FORK_OWNER}/${FORK_REPO} --jq .default_branch)"
+
+          # 上游信息（自动获取）
+          UPSTREAM_OWNER="$(gh api repos/${FORK_OWNER}/${FORK_REPO} --jq .parent.owner.login)"
+          UPSTREAM_REPO="$(gh api repos/${FORK_OWNER}/${FORK_REPO} --jq .parent.name)"
+          UPSTREAM_BRANCH="$(gh api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO} --jq .default_branch)"
+
+          echo "fork_owner=${FORK_OWNER}" >> $GITHUB_OUTPUT
+          echo "fork_repo=${FORK_REPO}" >> $GITHUB_OUTPUT
+          echo "fork_branch=${FORK_BRANCH}" >> $GITHUB_OUTPUT
+          echo "upstream_owner=${UPSTREAM_OWNER}" >> $GITHUB_OUTPUT
+          echo "upstream_repo=${UPSTREAM_REPO}" >> $GITHUB_OUTPUT
+          echo "upstream_branch=${UPSTREAM_BRANCH}" >> $GITHUB_OUTPUT
+
+          echo "上游: ${UPSTREAM_OWNER}/${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+          echo "你的: ${FORK_OWNER}/${FORK_REPO}@${FORK_BRANCH}"
+
+      - name: Fork Sync
+        uses: tgymnich/fork-sync@v1.8
         with:
-          owner: llvm
-          base: master
-          head: master
+          owner: ${{ steps.info.outputs.upstream_owner }}
+          repo: ${{ steps.info.outputs.upstream_repo }}
+          base: ${{ steps.info.outputs.upstream_branch }}
+          head: ${{ steps.info.outputs.fork_branch }}
+          github_token: ${{ secrets.PAT }}
+          merge_method: merge
