@@ -2,46 +2,17 @@ name: Sync Fork
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 每天 UTC 00:00（北京时间 08:00）
-  workflow_dispatch:
+    - cron: '0 0 * * *' # 每天 UTC 00:00（即北京时间 08:00）
+  workflow_dispatch: # 保留手动触发按钮
 
 jobs:
   sync:
+
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v2.0.10
+      - uses: tgymnich/fork-sync@v2.0.10
         with:
-          fetch-depth: 0
-
-      - name: Sync
-        run: |
-          set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 当前分支
-          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-
-          # 上游地址：GitHub 为 fork 自动配置的 upstream remote 优先
-          UPSTREAM_URL="$(git remote get-url upstream 2>/dev/null || true)"
-          if [ -z "$UPSTREAM_URL" ]; then
-            # 没有 upstream remote 时，用 GitHub API 公开字段推断（无需 token，仅公开仓库）
-            ORIGIN_PATH="$(git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#\.git$##')"
-            PARENT="$(curl -fsSL "https://api.github.com/repos/${ORIGIN_PATH}" | sed -n 's/.*"full_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-            # 无法直接拿到 parent 时，退化为 origin 的 owner + 当前仓库名
-            UPSTREAM_URL="https://github.com/${PARENT:-$(echo "$ORIGIN_PATH" | cut -d/ -f1)/$(echo "$ORIGIN_PATH" | cut -d/ -f2)}.git"
-          fi
-
-          UPSTREAM_PATH="$(echo "$UPSTREAM_URL" | sed -E 's#(git@|https://)github.com[:/]##; s#\.git$##')"
-          UPSTREAM_BRANCH="$(git ls-remote --symref "$UPSTREAM_URL" HEAD | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')"
-
-          echo "同步: $UPSTREAM_PATH@$UPSTREAM_BRANCH → $(git config --get remote.origin.url)@$BRANCH"
-
-          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch upstream "$UPSTREAM_BRANCH"
-          git checkout "$BRANCH"
-          git merge --no-edit "upstream/$UPSTREAM_BRANCH"
-          git push origin "$BRANCH"
+          owner: llvm
+          base: master
+          head: master
