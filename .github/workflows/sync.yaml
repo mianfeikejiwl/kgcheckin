@@ -1,18 +1,130 @@
-name: Sync Fork
+name: Sync Fork (Merge Mode)
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天 UTC 00:00（即北京时间 08:00）
-  workflow_dispatch: # 保留手动触发按钮
+    - cron: '0 3 * * *'      # 每天 UTC 03:00 自动同步
+  workflow_dispatch:          # 支持手动触发
+
+permissions:
+  contents: write             # 合并后推送需要写权限
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: false
 
 jobs:
-  sync:
-
+  sync-merge:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: tgymnich/fork-sync@v2.0.10
+      # ---------- 1. 查询上游（parent）信息 ----------
+      - name: Get upstream info via API
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          RESP=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                       -H "Accept: application/vnd.github+json" \
+                       "https://api.github.com/repos/$REPO")
+
+          IS_FORK=$(echo "$RESP" | jq -r '.fork')
+          if [ "$IS_FORK" != "true" ]; then
+            echo "::warning::当前仓库不是 Fork，跳过同步。"
+            echo "is_fork=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          FULL=$(echo "$RESP"   | jq -r '.parent.full_name')
+          OWNER=$(echo "$RESP"  | jq -r '.parent.owner.login')
+          REPO_N=$(echo "$RESP" | jq -r '.parent.name')
+          BRANCH=$(echo "$RESP" | jq -r '.parent.default_branch')
+
+          echo "is_fork=true"            >> $GITHUB_OUTPUT
+          echo "upstream_full_name=$FULL" >> $GITHUB_OUTPUT
+          echo "upstream_owner=$OWNER"    >> $GITHUB_OUTPUT
+          echo "upstream_repo=$REPO_N"    >> $GITHUB_OUTPUT
+          echo "upstream_branch=$BRANCH"  >> $GITHUB_OUTPUT
+          echo "上游仓库: $FULL (默认分支: $BRANCH)"
+
+      # ---------- 2. Checkout Fork ----------
+      - name: Checkout fork
+        if: steps.info.outputs.is_fork == 'true'
+        uses: actions/checkout@v4
         with:
-          owner: llvm
-          base: master
-          head: master
+          ref: ${{ steps.info.outputs.upstream_branch }}
+          fetch-depth: 0          # 必须，否则 merge 缺历史
+
+      # ---------- 3. 合并上游 ----------
+      - name: Merge upstream
+        if: steps.info.outputs.is_fork == 'true'
+        env:
+          UPSTREAM: ${{ steps.info.outputs.upstream_full_name }}
+          BRANCH: ${{ steps.info.outputs.upstream_branch }}
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch upstream "${BRANCH}"
+
+          # 无更新则直接退出，避免空 merge
+          if git merge-base --is-ancestor "upstream/${BRANCH}" HEAD; then
+            echo "已是最新，无需合并。"
+            echo "need_push=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 合并；冲突则失败并中止，需手动处理
+          if git merge --no-edit "upstream/${BRANCH}"; then
+            echo "合并成功。"
+            echo "need_push=true" >> $GITHUB_OUTPUT
+          else
+            echo "::error::合并冲突，需手动解决。"
+            git merge --abort
+            exit 1
+          fi
+
+      # ---------- 4. 写入上游信息文件 ----------
+      - name: Write UPSTREAM.md
+        if: steps.info.outputs.is_fork == 'true'
+        env:
+          FULL: ${{ steps.info.outputs.upstream_full_name }}
+          OWNER: ${{ steps.info.outputs.upstream_owner }}
+          REPO_N: ${{ steps.info.outputs.upstream_repo }}
+          BRANCH: ${{ steps.info.outputs.upstream_branch }}
+        run: |
+          cat > UPSTREAM.md <<EOF
+          # Upstream Info
+
+          - 原项目: [${FULL}](https://github.com/${FULL})
+          - 原作者: [${OWNER}](https://github.com/${OWNER})
+          - 项目名: ${REPO_N}
+          - 默认分支: ${BRANCH}
+          - 最后同步: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+
+      # ---------- 5. 提交并推送 ----------
+      - name: Commit & push
+        if: steps.info.outputs.is_fork == 'true'
+        env:
+          BRANCH: ${{ steps.info.outputs.upstream_branch }}
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add UPSTREAM.md
+          # 如果 UPSTREAM.md 有变化则提交（[skip ci] 防死循环）
+          if [ -n "$(git status --porcelain UPSTREAM.md)" ]; then
+            git commit -m "chore: update upstream info [skip ci]"
+          fi
+
+          # 有本地提交（merge 或 info 更新）才推送
+          if [ -n "$(git log origin/${BRANCH}..HEAD --oneline)" ]; then
+            git push origin "HEAD:${BRANCH}"
+            echo "已推送到 ${BRANCH}"
+          else
+            echo "无变更，跳过推送。"
+          fi
